@@ -11,7 +11,7 @@ One Brazilian Fintech needs to automate your monthly analsys transaction databas
 Design a agent flow that receive an csv file o financial transaction. Execute a complete analysis pipeline and produce an MD executive report, with finding, alerts and recommendations.
 
 #### Dataset 
-Link: https://www.kaggle.com/datasets/mlg-ulb/creditcardfraud
+ ./dataset/creditcard.csv
 
 
 ### Required Architecture:
