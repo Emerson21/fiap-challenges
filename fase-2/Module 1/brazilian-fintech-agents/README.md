@@ -1,108 +1,306 @@
-# Brazilian Fintech Agents
+# 🤖 Brazilian Fintech Agents
 
-Automated multi-agent pipeline for financial transaction analysis.
-Built for FIAP — Phase 2, Module 1.
+> Autonomous multi-agent pipeline for financial transaction analysis — FIAP Phase 2 · Module 1
 
-## Overview
+![Python](https://img.shields.io/badge/Python-3.10%2B-blue?logo=python&logoColor=white)
+![pandas](https://img.shields.io/badge/pandas-2.0%2B-150458?logo=pandas)
+![Status](https://img.shields.io/badge/status-complete-brightgreen)
+![License](https://img.shields.io/badge/license-Academic-lightgrey)
 
-A three-agent sequential data-flow pipeline that ingests a credit-card transaction CSV, performs exploratory data analysis, detects anomalies, and produces an executive Markdown report — with no manual intervention.
+---
+
+## 📋 Table of Contents
+
+- [Overview](#-overview)
+- [Architecture](#-architecture)
+- [Project Structure](#-project-structure)
+- [Agents](#-agents)
+- [Dataset](#-dataset)
+- [Quick Start](#-quick-start)
+- [Pipeline Output](#-pipeline-output)
+- [Deliverables](#-deliverables)
+- [Documentation](#-documentation)
+- [License](#-license)
+
+---
+
+## 🔍 Overview
+
+A Brazilian Fintech company needed to automate its monthly analysis of credit-card transactions — a process that previously took analysts several days. This project delivers an **autonomous three-agent pipeline** that:
+
+1. **Ingests** and validates a raw CSV transaction file
+2. **Analyses** distributions, temporal trends, and anomalies
+3. **Writes** a complete executive report in Markdown — automatically
+
+The full pipeline completes in **< 3 seconds** on a standard laptop, processing over **283,000 transactions** with zero manual steps.
 
 ```
-[CSV] → IngestionAgent → EDAAgent → ReportWriterAgent → executive_report.md
+creditcard.csv  ──►  IngestionAgent  ──►  EDAAgent  ──►  ReportWriterAgent  ──►  executive_report.md
 ```
 
-## Project Structure
+**Key findings on the dataset:**
+
+| Metric | Value |
+|--------|-------|
+| Total transactions analysed | 283,726 |
+| Duplicates removed | 1,081 |
+| Fraudulent transactions | 473 (0.167%) |
+| Peak fraud window | Hour 26 — 1.56% fraud rate |
+| Top discriminant feature | V17 (r = −0.3135) |
+| Amount outliers flagged | 20 (IQR method, bound = €293.24) |
+
+---
+
+## 🏗️ Architecture
+
+![Architecture Diagram](./design/architecture_diagram.png)
+
+The system is a **sequential data-flow pipeline**. Each agent has one responsibility, communicates through typed Python dataclasses, and can be tested independently.
+
+```
+┌─────────────────────────────────────────────────────────┐
+│                   main.py (Orchestrator)                │
+│                                                         │
+│  [1] IngestionAgent.run(csv_path)                       │
+│        └──► (DataFrame, DataSummary)                    │
+│                                                         │
+│  [2] EDAAgent.run(df, summary)                          │
+│        └──► EDAResults                                  │
+│                                                         │
+│  [3] ReportWriterAgent.run(summary, eda_results)         │
+│        └──► output/executive_report.md                  │
+└─────────────────────────────────────────────────────────┘
+```
+
+Design principles: **single responsibility**, **immutable data contracts**, **fail-fast validation**, **pure data flow**, **full testability**.
+
+---
+
+## 📁 Project Structure
 
 ```
 brazilian-fintech-agents/
+│
+├── main.py                          # Pipeline entry point (CLI)
+├── requirements.txt                 # pandas, numpy, scipy
+│
 ├── agents/
-│   ├── ingestion_agent.py       # Agent 1 — load, validate, clean
-│   ├── eda_agent.py             # Agent 2 — analyse, detect anomalies
-│   └── report_writer_agent.py   # Agent 3 — generate Markdown report
+│   ├── ingestion_agent.py           # Agent 1 — load, validate, clean
+│   ├── eda_agent.py                 # Agent 2 — analyse, detect anomalies
+│   └── report_writer_agent.py       # Agent 3 — render executive report
+│
 ├── models/
-│   ├── data_summary.py          # DataSummary dataclass (Agent 1 output)
-│   └── eda_results.py           # EDAResults dataclass (Agent 2 output)
+│   ├── data_summary.py              # DataSummary dataclass (Agent 1 → Agent 2)
+│   └── eda_results.py               # EDAResults dataclass (Agent 2 → Agent 3)
+│
 ├── tools/
-│   ├── exceptions.py            # SchemaValidationError, DataQualityError
-│   ├── logger.py                # Centralised logging
-│   └── markdown_helpers.py      # Markdown table & section builders
+│   ├── exceptions.py                # SchemaValidationError, DataQualityError
+│   ├── logger.py                    # Centralised logging factory
+│   └── markdown_helpers.py          # Table, section and insight builders
+│
 ├── dataset/
-│   └── creditcard.csv           # Input data (not committed if large)
+│   └── creditcard.csv               # ⚠️ Not committed — download from Kaggle
+│
+├── output/
+│   └── executive_report.md          # Generated by pipeline (git-ignored)
+│
 ├── spec/
-│   └── spec.md                  # Detailed requirements specification
+│   └── spec.md                      # Requirements specification (SDD)
+│
 ├── design/
-│   └── design.md                # Architecture & class design document
-├── output/                      # Generated reports (git-ignored)
-├── main.py                      # Pipeline entry point
-└── requirements.txt
+│   ├── design.md                    # Architecture & class design document
+│   └── architecture_diagram.png     # Visual pipeline diagram
+│
+└── technical_report.md              # Architecture decisions & anomaly strategy
 ```
 
-## Requirements
+---
 
-- Python 3.10+
-- Dependencies: `pandas`, `numpy`, `scipy`
+## 🤖 Agents
 
-## Installation
+### Agent 1 — `IngestionAgent`
 
-```bash
-# Clone the repository
-git clone https://github.com/<your-username>/fiap-challenges.git
-cd "fiap-challenges/fase-2/Module 1/brazilian-fintech-agents"
+**File:** [`agents/ingestion_agent.py`](agents/ingestion_agent.py)
 
-# Create and activate a virtual environment (recommended)
-python -m venv .venv
-source .venv/bin/activate   # Linux / macOS
-# .venv\Scripts\activate    # Windows
+| Step | Action |
+|------|--------|
+| ① Load | Read CSV with `pd.read_csv` |
+| ② Validate schema | Assert all 31 required columns are present |
+| ③ Check nulls | Raise `DataQualityError` if any column exceeds 20% nulls |
+| ④ Impute nulls | Fill with column median |
+| ⑤ Remove duplicates | Drop exact duplicate rows |
+| ⑥ Coerce types | `Class` → int64, `Amount`/`Time` → float64 |
+| ⑦ Summarise | Return `DataSummary` dataclass |
 
-# Install dependencies
-pip install -r requirements.txt
-```
+**Output:** `(pd.DataFrame, DataSummary)`
 
-## Usage
+---
 
-```bash
-# Run with default paths
-python main.py
+### Agent 2 — `EDAAgent`
 
-# Run with custom paths
-python main.py --input ./dataset/creditcard.csv --output ./output
-```
+**File:** [`agents/eda_agent.py`](agents/eda_agent.py)
 
-The report will be written to `./output/executive_report.md`.
+| Step | Action |
+|------|--------|
+| ① Class distribution | Count and % of fraud vs. legitimate |
+| ② Amount stats | Mean, std, P25/P50/P75/P95/P99 |
+| ③ IQR outlier detection | Flag Amount > Q3 + 3×IQR |
+| ④ Hourly trend | Bin `Time` into 1-hour windows; fraud rate per bin |
+| ⑤ Fraud comparison | Mean amount for fraud vs. legitimate |
+| ⑥ Feature correlations | Pearson corr of V1–V28 with `Class` |
 
-## Dataset
+**Output:** `EDAResults` dataclass
 
-> ⚠️ **The dataset is NOT included in this repository** (143MB — exceeds GitHub's 100MB limit).  
-> Download it from Kaggle before running the pipeline:
+---
+
+### Agent 3 — `ReportWriterAgent`
+
+**File:** [`agents/report_writer_agent.py`](agents/report_writer_agent.py)
+
+| Section | Content |
+|---------|---------|
+| Executive Summary | Dataset size, fraud prevalence, time span |
+| Dataset Overview | Shape, time range, class balance table |
+| Transaction Analysis | Amount distribution, temporal trends, feature correlations |
+| Anomalies | IQR outlier table + highest-risk time windows |
+| Actionable Insights | 3 business recommendations derived from findings |
+| Methodology | IQR parameters, correlation method, pipeline metadata |
+
+**Output:** `output/executive_report.md`
+
+---
+
+## 📊 Dataset
+
+> ⚠️ **The dataset is NOT included in this repository** (143MB — exceeds GitHub's 100MB file limit).
 >
-> 📥 **[Credit Card Fraud Detection — Kaggle](https://www.kaggle.com/datasets/mlg-ulb/creditcardfraud)**
+> 📥 **Download from Kaggle:**  
+> **[Credit Card Fraud Detection — ULB Machine Learning Group](https://www.kaggle.com/datasets/mlg-ulb/creditcardfraud)**
 >
 > After downloading, place the file at:
 > ```
 > dataset/creditcard.csv
 > ```
 
-The pipeline expects `./dataset/creditcard.csv` with the following schema:
+### Schema
 
-| Column | Description |
-|--------|-------------|
-| `Time` | Seconds elapsed since the first transaction |
-| `V1`–`V28` | Anonymised PCA-transformed features |
-| `Amount` | Transaction value (EUR) |
-| `Class` | Label: `1` = fraud, `0` = legitimate |
+| Column | Type | Description |
+|--------|------|-------------|
+| `Time` | float64 | Seconds elapsed since first transaction |
+| `V1` – `V28` | float64 | Anonymised PCA-transformed features |
+| `Amount` | float64 | Transaction value (EUR) |
+| `Class` | int64 | `1` = fraud, `0` = legitimate |
 
-## Architecture
+**Note:** The dataset is highly imbalanced (0.172% fraud). Standard accuracy is misleading — use AUPRC as the evaluation metric.
 
-See [`design/design.md`](design/design.md) for the full architecture diagram and class design.
+---
 
-## Agents
+## 🚀 Quick Start
 
-| Agent | File | Responsibility |
-|-------|------|----------------|
-| **IngestionAgent** | `agents/ingestion_agent.py` | Validate schema, handle nulls, coerce types, produce `DataSummary` |
-| **EDAAgent** | `agents/eda_agent.py` | Compute distributions, detect outliers, analyse temporal trends |
-| **ReportWriterAgent** | `agents/report_writer_agent.py` | Render and write `executive_report.md` |
+### Prerequisites
+
+- Python 3.10+
+- Dataset downloaded from Kaggle (see above)
+
+### Installation
+
+```bash
+# 1. Clone the repository
+git clone https://github.com/Emerson21/fiap-challenges.git
+cd "fiap-challenges/fase-2/Module 1/brazilian-fintech-agents"
+
+# 2. Create and activate a virtual environment
+python -m venv .venv
+source .venv/bin/activate       # Linux / macOS
+# .venv\Scripts\activate        # Windows
+
+# 3. Install dependencies
+pip install -r requirements.txt
+```
+
+### Run the Pipeline
+
+```bash
+# Default paths
+python main.py
+
+# Custom paths
+python main.py --input ./dataset/creditcard.csv --output ./output
+```
+
+### Expected Output
+
+```
+2026-09-13 14:45:05  [INFO]  __main__ — Pipeline starting
+2026-09-13 14:45:05  [INFO]  __main__ — [1/3] IngestionAgent
+2026-09-13 14:45:06  [INFO]  agents.ingestion_agent — Loaded 284807 rows × 31 columns
+2026-09-13 14:45:06  [INFO]  agents.ingestion_agent — IngestionAgent complete — shape: (283726, 31)
+2026-09-13 14:45:06  [INFO]  __main__ — [2/3] EDAAgent
+2026-09-13 14:45:07  [INFO]  agents.eda_agent — EDAAgent complete — fraud: 473 (0.167%)
+2026-09-13 14:45:07  [INFO]  __main__ — [3/3] ReportWriterAgent
+2026-09-13 14:45:07  [INFO]  __main__ — Pipeline complete. Report written to: .../output/executive_report.md
+```
+
+---
+
+## 📄 Pipeline Output
+
+The pipeline produces [`output/executive_report.md`](output/executive_report.md) with the following structure:
+
+```
+# Executive Report — Financial Transaction Analysis
+## 1. Executive Summary
+## 2. Dataset Overview
+## 3. Transaction Analysis
+   ### 3.1 Amount Distribution
+   ### 3.2 Temporal Trends — Top 10 Busiest Hours
+   ### 3.3 Fraud vs. Legitimate — Average Amount
+   ### 3.4 Top Discriminant Features (V1–V28 × Class)
+## 4. Anomalies
+   ### 4.1 High-Value Outlier Transactions (IQR method)
+   ### 4.2 Highest-Risk Time Windows
+## 5. Actionable Insights
+   ### Insight 1: Targeted Fraud Monitoring During Peak-Risk Hours
+   ### Insight 2: Fraud Prevalence Requires Precision-Recall Optimisation
+   ### Insight 3: Leverage Feature V17 for Fraud Signals
+## 6. Methodology Notes
+```
+
+---
+
+## 📦 Deliverables
+
+| # | Deliverable | Status | Location |
+|---|-------------|--------|----------|
+| D-1 | Source Code | ✅ Complete | This repository |
+| D-2 | Architecture Diagram | ✅ Complete | [`design/architecture_diagram.png`](design/architecture_diagram.png) |
+| D-3 | Technical Report | ✅ Complete | [`technical_report.md`](technical_report.md) |
+| D-4 | Executive Report | ✅ Complete | [`output/executive_report.md`](output/executive_report.md) |
+
+---
+
+## 📚 Documentation
+
+| Document | Description |
+|----------|-------------|
+| [`spec/spec.md`](spec/spec.md) | Full requirements specification — objectives, schema, agent contracts, acceptance criteria |
+| [`design/design.md`](design/design.md) | Architecture design — module layout, class interfaces, data contracts, Mermaid diagram |
+| [`technical_report.md`](technical_report.md) | Architecture decisions and anomaly detection strategy justification |
+
+---
+
+## 🛠️ Dependencies
+
+```txt
+pandas>=2.0.0
+numpy>=1.26.0
+scipy>=1.13.0
+```
+
+No LLMs, no API keys, no external services. Runs entirely offline.
+
+---
 
 ## License
 
-Academic project — FIAP. No licence for commercial use.
+Academic project — FIAP Phase 2, Module 1. No licence for commercial use.

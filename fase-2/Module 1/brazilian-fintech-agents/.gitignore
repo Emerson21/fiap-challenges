@@ -4,6 +4,9 @@ output/
 # Dataset — too large for GitHub (143MB), download from Kaggle
 dataset/creditcard.csv
 
+# Environment variables — NEVER commit your API key
+.env
+
 __pycache__/
 *.py[cod]
 *.egg-info/

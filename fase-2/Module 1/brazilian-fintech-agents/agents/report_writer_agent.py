@@ -1,297 +1,277 @@
 # agents/report_writer_agent.py
 """
-Agent 3 — Report Writer
+Agent 3 — ReportWriterAgent
 
-Responsible for:
-  - Assembling the full executive Markdown report from structured inputs
-  - Rendering all sections: summary, dataset overview, analysis, anomalies,
-    actionable insights, and methodology notes
-  - Writing the final report to the output directory
+Responsibilities:
+  - Receive DataProfile (from Agent 1) + AnalysisResult (from Agent 2)
+  - Call Gemini to write the FULL executive report in Markdown
+  - If LLM is unavailable, assemble the report from structured data
+    using template rendering (graceful fallback)
+  - Write the report to output/executive_report.md
 """
 import os
 from datetime import datetime
 from pathlib import Path
 
-from models.data_summary import DataSummary
-from models.eda_results import EDAResults
-from tools.markdown_helpers import make_section, make_table, make_insight
-from tools.logger import get_logger
+from models.data_profile import DataProfile
+from models.analysis_result import AnalysisResult
+from tools import get_logger
+from tools.markdown_helpers import make_table, make_section, make_insight
+import tools.gemini_client as llm
 
 log = get_logger(__name__)
 
 
 class ReportWriterAgent:
-    """Assembles and writes the executive Markdown report."""
+    """Agent 3: LLM-authored executive report writer."""
 
-    VERSION = "0.1.0"
+    VERSION = "0.2.0"
 
     def __init__(self, output_dir: str = "./output"):
         self.output_dir = Path(output_dir)
         self.output_file = "executive_report.md"
 
-    # ------------------------------------------------------------------
-    # Public interface
-    # ------------------------------------------------------------------
-
-    def run(self, summary: DataSummary, eda: EDAResults) -> str:
+    def run(self, profile: DataProfile, analysis: AnalysisResult) -> str:
         """
-        Render the full report and write it to disk.
+        Generate and write the executive report.
 
         Args:
-            summary (DataSummary): From IngestionAgent.
-            eda (EDAResults): From EDAAgent.
+            profile (DataProfile): Dataset understanding from Agent 1.
+            analysis (AnalysisResult): Analysis results from Agent 2.
 
         Returns:
-            str: Absolute path to the written report file.
+            str: Absolute path to the written report.
         """
-        log.info("ReportWriterAgent v%s started", self.VERSION)
+        log.info("ReportWriterAgent v%s | source: %s", self.VERSION, analysis.generated_by)
 
-        sections = [
-            self._render_header(),
-            self._render_executive_summary(summary, eda),
-            self._render_dataset_overview(summary),
-            self._render_transaction_analysis(eda),
-            self._render_anomalies_table(eda),
-            self._render_insights(summary, eda),
-            self._render_methodology(eda),
-            self._render_footer(summary),
-        ]
+        if llm.is_available():
+            content = self._llm_report(profile, analysis)
+            source = "llm"
+        else:
+            log.warning("Gemini not available — using template fallback for report")
+            content = self._template_report(profile, analysis)
+            source = "fallback"
 
-        content = "\n\n".join(sections)
-        output_path = self._write_report(content)
-
-        log.info("Report written to: %s", output_path)
+        content = self._append_footer(content, profile, source)
+        output_path = self._write(content)
+        log.info("Report written to: %s | source: %s", output_path, source)
         return str(output_path)
 
     # ------------------------------------------------------------------
-    # Section renderers
+    # LLM-authored report
     # ------------------------------------------------------------------
 
-    def _render_header(self) -> str:
-        ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        return (
-            "# Executive Report — Financial Transaction Analysis\n\n"
-            f"**Generated:** {ts}  \n"
-            f"**Pipeline version:** ReportWriterAgent v{self.VERSION}\n"
+    def _llm_report(self, profile: DataProfile, analysis: AnalysisResult) -> str:
+        insights_json = "\n".join(
+            f'  {i+1}. Title: "{ins["title"]}" | Finding: "{ins["finding"]}" | Action: "{ins["recommended_action"]}"'
+            for i, ins in enumerate(analysis.llm_actionable_insights)
         )
 
-    def _render_executive_summary(self, summary: DataSummary, eda: EDAResults) -> str:
-        n_rows, _ = summary.shape
-        fraud_count = eda.class_distribution_count.get(1, 0)
-        fraud_pct = eda.class_distribution_pct.get(1, 0.0) * 100
-        span_h = summary.date_range.span_hours
-
-        body = (
-            f"This report summarises the automated analysis of **{n_rows:,} credit-card transactions** "
-            f"spanning **{span_h:.1f} hours** of activity. "
-            f"The pipeline detected **{fraud_count:,} fraudulent transactions** "
-            f"({fraud_pct:.3f}% of total volume), consistent with a severely imbalanced dataset "
-            f"requiring specialised anomaly detection techniques.\n\n"
-            f"Key findings, outlier alerts, and three actionable business recommendations are "
-            f"detailed in the sections below."
+        outlier_rows = "\n".join(
+            f"  - Row {o.index}: €{o.amount:.2f} ({'FRAUD' if o.is_fraud else 'Legitimate'})"
+            for o in analysis.outliers[:10]
         )
 
-        return make_section("1. Executive Summary") + body
+        risk_rows = "\n".join(
+            f"  - Hour {w.hour_bin}: {w.fraud_count} fraud / {w.tx_count} tx ({w.fraud_rate_pct:.3f}%)"
+            for w in analysis.top_risk_windows
+        )
 
-    def _render_dataset_overview(self, summary: DataSummary) -> str:
-        dr = summary.date_range
-        a = summary.amount_stats
-        n_rows, n_cols = summary.shape
+        feature_rows = "\n".join(
+            f"  - {f.feature}: r={f.correlation:+.4f}"
+            for f in analysis.feature_signals[:5]
+        )
 
+        prompt = f"""You are a senior financial analyst writing an executive report for a fintech risk team.
+
+ANALYSIS GOAL: "{profile.analysis_goal}"
+DATASET: {profile.dataset_name} — {profile.shape[0]:,} rows × {profile.shape[1]} columns
+DOMAIN: {profile.domain}
+
+DATASET PROFILE SUMMARY:
+{profile.llm_summary}
+
+KEY STATISTICS:
+- Fraud rate: {analysis.fraud_rate_pct:.4f}% ({analysis.class_distribution.get("1", 0):,} fraudulent transactions)
+- Average transaction amount: €{analysis.amount_mean:.2f} (std: €{analysis.amount_std:.2f})
+- Fraud vs. Legitimate amount: €{analysis.fraud_amount_mean:.2f} vs €{analysis.legit_amount_mean:.2f}
+- High-value outliers detected: {len(analysis.outliers)} (threshold: €{analysis.outlier_threshold:.2f})
+
+ANALYTICAL INTERPRETATION:
+{analysis.llm_interpretation}
+
+ANOMALY FINDINGS:
+{analysis.llm_anomaly_narrative}
+
+KEY FINDINGS:
+{chr(10).join(f"- {f}" for f in analysis.llm_key_findings)}
+
+TOP RISK TIME WINDOWS:
+{risk_rows}
+
+TOP OUTLIER TRANSACTIONS:
+{outlier_rows}
+
+TOP CORRELATED FEATURES:
+{feature_rows}
+
+PREPARED INSIGHTS:
+{insights_json}
+
+Write a complete, professional executive report in Markdown with EXACTLY these sections:
+
+# Executive Report — [give a title based on the goal]
+
+## 1. Executive Summary
+[2 paragraph summary of what was found]
+
+## 2. Dataset Overview
+[Include a Markdown table with key stats: rows, columns, fraud count, fraud rate, time span, amount range]
+
+## 3. Transaction Analysis
+### 3.1 Amount Distribution
+[Table: mean, std, P25, P50, P75, P95, P99]
+
+### 3.2 Temporal Trends
+[Table of top risk time windows with hour bin, tx count, fraud count, fraud rate]
+
+### 3.3 Fraud Signals
+[Table of top correlated features with correlation values and a brief interpretation]
+
+## 4. Anomalies Detected
+### 4.1 High-Value Outlier Transactions
+[Table of outlier transactions: row index, amount, classification]
+
+### 4.2 Highest-Risk Time Windows
+[Table]
+
+## 5. Actionable Insights
+[Write exactly 3 insights using the prepared insights above, formatted as:
+### Insight N: [Title]
+**Finding:** ...
+**Recommended Action:** ...]
+
+## 6. Methodology
+[Brief explanation of IQR method, temporal binning, and correlation analysis]
+
+Write the report now. Use the exact data provided. Be specific with numbers.
+Do not add any text before or after the Markdown report."""
+
+        content = llm.call(prompt)
+        if not content:
+            log.warning("LLM report generation failed — falling back to template")
+            return self._template_report(profile, analysis)
+        return content
+
+    # ------------------------------------------------------------------
+    # Template fallback report
+    # ------------------------------------------------------------------
+
+    def _template_report(self, profile: DataProfile, analysis: AnalysisResult) -> str:
+        n_rows, n_cols = profile.shape
+        sections = []
+
+        # Header
+        sections.append(
+            f"# Executive Report — {profile.analysis_goal.title()}\n\n"
+            f"**Dataset:** {profile.dataset_name}  \n"
+            f"**Goal:** {profile.analysis_goal}  \n"
+            f"**Domain:** {profile.domain}\n"
+        )
+
+        # Executive Summary
+        fraud_n = analysis.class_distribution.get("1", 0)
+        sections.append(
+            make_section("1. Executive Summary") +
+            f"This report summarises the automated analysis of **{n_rows:,} transactions** "
+            f"with the goal of **{profile.analysis_goal}**. "
+            f"The pipeline detected **{fraud_n:,} fraudulent transactions** "
+            f"({analysis.fraud_rate_pct:.3f}% of total volume).\n\n"
+            f"{profile.llm_summary or ''}"
+        )
+
+        # Dataset Overview
         overview_rows = [
             ["Total rows", f"{n_rows:,}"],
             ["Total columns", str(n_cols)],
-            ["Duplicates removed", str(summary.duplicates_removed)],
-            ["Time span", f"{dr.span_hours:.2f} hours"],
-            ["Min time (sec)", f"{dr.min_time_sec:,.0f}"],
-            ["Max time (sec)", f"{dr.max_time_sec:,.0f}"],
-            ["Amount min", f"€{a.min:.2f}"],
-            ["Amount max", f"€{a.max:.2f}"],
-            ["Amount mean", f"€{a.mean:.2f}"],
-            ["Amount std dev", f"€{a.std:.2f}"],
+            ["Target field", profile.target_field or "N/A"],
+            ["Fraud count", f"{fraud_n:,}"],
+            ["Fraud rate", f"{analysis.fraud_rate_pct:.3f}%"],
+            ["Amount mean", f"€{analysis.amount_mean:.2f}"],
+            ["Amount std", f"€{analysis.amount_std:.2f}"],
         ]
+        sections.append(make_section("2. Dataset Overview") + make_table(["Property", "Value"], overview_rows))
 
-        legit = summary.class_distribution.get(0, 0)
-        fraud = summary.class_distribution.get(1, 0)
-        class_rows = [
-            ["Legitimate (0)", f"{legit:,}", f"{legit/n_rows*100:.3f}%"],
-            ["Fraudulent (1)", f"{fraud:,}", f"{fraud/n_rows*100:.3f}%"],
-        ]
-
-        return (
-            make_section("2. Dataset Overview")
-            + make_table(["Property", "Value"], overview_rows)
-            + "\n"
-            + make_section("Class Balance", level=3)
-            + make_table(["Class", "Count", "Percentage"], class_rows)
-        )
-
-    def _render_transaction_analysis(self, eda: EDAResults) -> str:
-        # Amount distribution
-        p = eda.amount_percentiles
+        # Analysis
+        p = analysis.amount_percentiles
         amount_rows = [
-            ["Mean", f"€{eda.amount_mean:.2f}"],
-            ["Std Dev", f"€{eda.amount_std:.2f}"],
-            ["P25", f"€{p['p25']:.2f}"],
-            ["Median (P50)", f"€{p['p50']:.2f}"],
-            ["P75", f"€{p['p75']:.2f}"],
-            ["P95", f"€{p['p95']:.2f}"],
-            ["P99", f"€{p['p99']:.2f}"],
+            ["Mean", f"€{analysis.amount_mean:.2f}"],
+            ["Std Dev", f"€{analysis.amount_std:.2f}"],
+            ["P25", f"€{p.get('p25', 0):.2f}"],
+            ["Median (P50)", f"€{p.get('p50', 0):.2f}"],
+            ["P75", f"€{p.get('p75', 0):.2f}"],
+            ["P95", f"€{p.get('p95', 0):.2f}"],
+            ["P99", f"€{p.get('p99', 0):.2f}"],
         ]
-
-        # Temporal — top-10 hourly bins by volume
-        sorted_by_vol = sorted(eda.hourly_trend, key=lambda b: b.tx_count, reverse=True)[:10]
         trend_rows = [
-            [str(b.hour_bin), f"{b.tx_count:,}", str(b.fraud_count), f"{b.fraud_rate*100:.3f}%"]
-            for b in sorted_by_vol
+            [str(w.hour_bin), f"{w.tx_count:,}", str(w.fraud_count), f"{w.fraud_rate_pct:.3f}%"]
+            for w in analysis.top_risk_windows
         ]
-
-        # Fraud comparison
-        comp_rows = [
-            ["Fraudulent", f"€{eda.fraud_amount_mean:.2f}"],
-            ["Legitimate", f"€{eda.legit_amount_mean:.2f}"],
-            ["Difference", f"€{abs(eda.fraud_amount_mean - eda.legit_amount_mean):.2f}"],
-        ]
-
-        # Top correlated features
         feat_rows = [
-            [f.feature, f"{f.correlation:+.4f}"]
-            for f in eda.top_correlated_features
+            [f.feature, f"{f.correlation:+.4f}", f.interpretation or "—"]
+            for f in analysis.feature_signals[:8]
         ]
-
-        return (
-            make_section("3. Transaction Analysis")
-            + make_section("3.1 Amount Distribution", level=3)
-            + make_table(["Statistic", "Value"], amount_rows)
-            + "\n"
-            + make_section("3.2 Temporal Trends — Top 10 Busiest Hours", level=3)
-            + make_table(["Hour Bin", "Tx Count", "Fraud Count", "Fraud Rate"], trend_rows)
-            + "\n"
-            + make_section("3.3 Fraud vs. Legitimate — Average Amount", level=3)
-            + make_table(["Segment", "Average Amount"], comp_rows)
-            + "\n"
-            + make_section("3.4 Top Discriminant Features (V1–V28 × Class)", level=3)
-            + make_table(["Feature", "Correlation with Class"], feat_rows)
+        sections.append(
+            make_section("3. Transaction Analysis") +
+            make_section("3.1 Amount Distribution", level=3) + make_table(["Statistic", "Value"], amount_rows) + "\n" +
+            make_section("3.2 Temporal Trends — Top Risk Windows", level=3) + make_table(["Hour Bin", "Tx Count", "Fraud Count", "Fraud Rate"], trend_rows) + "\n" +
+            make_section("3.3 Fraud Signal Features", level=3) + make_table(["Feature", "Correlation", "Interpretation"], feat_rows)
         )
 
-    def _render_anomalies_table(self, eda: EDAResults) -> str:
-        if not eda.amount_outliers:
-            body = "_No Amount outliers detected above the IQR threshold._\n"
-            return make_section("4. Anomalies Table") + body
-
-        rows = [
-            [
-                str(o.index),
-                f"€{o.amount:.2f}",
-                "🚨 FRAUD" if o.is_fraud else "Legitimate",
-            ]
-            for o in eda.amount_outliers
+        # Anomalies
+        outlier_rows = [
+            [str(o.index), f"€{o.amount:.2f}", "🚨 FRAUD" if o.is_fraud else "Legitimate"]
+            for o in analysis.outliers
         ]
+        sections.append(make_section("4. Anomalies") + make_table(["Row", "Amount", "Class"], outlier_rows))
 
-        # Top fraud-rate windows
-        window_rows = [
-            [str(b.hour_bin), f"{b.tx_count:,}", str(b.fraud_count), f"{b.fraud_rate*100:.3f}%"]
-            for b in eda.top_fraud_windows
-        ]
+        # Insights
+        insights_content = make_section("5. Actionable Insights")
+        if analysis.llm_actionable_insights:
+            for i, ins in enumerate(analysis.llm_actionable_insights[:3], 1):
+                insights_content += make_insight(i, ins.get("title", ""), ins.get("finding", ""), ins.get("recommended_action", "")) + "\n"
+        else:
+            insights_content += "_Insights not available (LLM fallback mode)._\n"
+        sections.append(insights_content)
 
-        return (
-            make_section("4. Anomalies")
-            + make_section("4.1 High-Value Outlier Transactions (IQR method)", level=3)
-            + make_table(["Row Index", "Amount", "Class"], rows)
-            + "\n"
-            + make_section("4.2 Highest-Risk Time Windows", level=3)
-            + make_table(["Hour Bin", "Tx Count", "Fraud Count", "Fraud Rate"], window_rows)
+        # Methodology
+        sections.append(
+            make_section("6. Methodology") +
+            "Outlier detection uses the **IQR method** (upper bound = Q3 + 3×IQR). "
+            "Temporal analysis bins the time column into 1-hour windows. "
+            "Feature correlation uses Pearson correlation with the target variable.\n"
         )
 
-    def _render_insights(self, summary: DataSummary, eda: EDAResults) -> str:
-        fraud_pct = eda.class_distribution_pct.get(1, 0.0) * 100
-        top_window = eda.top_fraud_windows[0] if eda.top_fraud_windows else None
-        top_feature = eda.top_correlated_features[0] if eda.top_correlated_features else None
+        return "\n\n".join(sections)
 
-        insight_1 = make_insight(
-            1,
-            "Targeted Fraud Monitoring During Peak-Risk Hours",
-            (
-                f"Hour bin **{top_window.hour_bin}** shows the highest fraud rate "
-                f"({top_window.fraud_rate*100:.2f}%) in the dataset."
-                if top_window else "A time window with elevated fraud was detected."
-            ),
-            "Deploy real-time transaction scoring during identified peak-risk hours and "
-            "trigger additional authentication steps (e.g., OTP) for transactions in those windows.",
-        )
+    # ------------------------------------------------------------------
+    # Shared helpers
+    # ------------------------------------------------------------------
 
-        insight_2 = make_insight(
-            2,
-            "Fraud Prevalence Requires Precision-Recall Optimisation",
-            (
-                f"Fraud accounts for only **{fraud_pct:.3f}%** of all transactions. "
-                "Standard accuracy metrics are misleading; a naive classifier predicting 'legitimate' "
-                "would score >99% accuracy while missing all fraud."
-            ),
-            "Adopt AUPRC (Area Under Precision-Recall Curve) as the primary model evaluation metric. "
-            "Apply class-weight balancing or oversampling (e.g., SMOTE) if a ML model is introduced.",
-        )
-
-        insight_3 = make_insight(
-            3,
-            f"Leverage Feature {top_feature.feature if top_feature else 'V-series'} for Fraud Signals",
-            (
-                f"**{top_feature.feature}** has the strongest correlation with fraud "
-                f"(r = {top_feature.correlation:+.4f}), making it the most discriminant PCA component."
-                if top_feature else "PCA features show varying correlation with fraud labels."
-            ),
-            f"Prioritise {top_feature.feature if top_feature else 'high-correlation features'} in any "
-            "rule-based or ML-based fraud detection model. Investigate its original business interpretation "
-            "with the data provider to design targeted business rules.",
-        )
-
-        return (
-            make_section("5. Actionable Insights")
-            + insight_1
-            + "\n"
-            + insight_2
-            + "\n"
-            + insight_3
-        )
-
-    def _render_methodology(self, eda: EDAResults) -> str:
-        body = (
-            "### Anomaly Detection — IQR Method\n\n"
-            "Outliers in the `Amount` column are identified using the **Interquartile Range (IQR)** method:\n\n"
-            "```\n"
-            "Q1 = Amount.quantile(0.25)\n"
-            "Q3 = Amount.quantile(0.75)\n"
-            "IQR = Q3 - Q1\n"
-            "upper_bound = Q3 + 3.0 × IQR\n"
-            "flagged = transactions where Amount > upper_bound\n"
-            "```\n\n"
-            "**Rationale:** IQR is robust to skewed distributions, which is appropriate for transaction amounts "
-            "that are heavily right-skewed. The 3× multiplier reduces false positives on legitimate high-value transactions.\n\n"
-            "### Temporal Analysis\n\n"
-            "The `Time` column (seconds elapsed since first transaction) is binned into 1-hour windows "
-            "using integer division (`Time // 3600`). Each bin is analysed for fraud concentration.\n\n"
-            "### Feature Correlation\n\n"
-            "Pearson correlation between each anonymised PCA feature (V1–V28) and the `Class` label "
-            "is computed to surface the most discriminant signals for fraud detection."
-        )
-
-        return make_section("6. Methodology Notes") + body
-
-    def _render_footer(self, summary: DataSummary) -> str:
+    def _append_footer(self, content: str, profile: DataProfile, source: str) -> str:
         ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        return (
-            "---\n\n"
-            "_Report generated by **Brazilian Fintech Agents** pipeline_  \n"
+        footer = (
+            f"\n\n---\n\n"
+            f"_Report generated by **Brazilian Fintech Agents** pipeline_  \n"
+            f"_Goal: {profile.analysis_goal}_  \n"
             f"_Run date: {ts}_  \n"
-            f"_Dataset shape: {summary.shape[0]:,} rows × {summary.shape[1]} columns_"
+            f"_Dataset: {profile.dataset_name} — {profile.shape[0]:,} rows_  \n"
+            f"_Report source: {source}_"
         )
+        return content + footer
 
-    # ------------------------------------------------------------------
-    # I/O
-    # ------------------------------------------------------------------
-
-    def _write_report(self, content: str) -> Path:
+    def _write(self, content: str) -> Path:
         self.output_dir.mkdir(parents=True, exist_ok=True)
-        output_path = self.output_dir / self.output_file
-        output_path.write_text(content, encoding="utf-8")
-        return output_path.resolve()
+        path = self.output_dir / self.output_file
+        path.write_text(content, encoding="utf-8")
+        return path.resolve()

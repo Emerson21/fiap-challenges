@@ -1,9 +1,9 @@
 # Specification Document — Brazilian Fintech Agents
 
-> **Status:** Draft  
-> **Version:** 0.1.0  
+> **Status:** Final  
+> **Version:** 2.0.0  
 > **Date:** 2026-09-13  
-> **Module:** FIAP — Phase 2, Module 1  
+> **Module:** FIAP — Phase 2, Module 1
 
 ---
 
@@ -15,7 +15,7 @@ A Brazilian Fintech company currently relies on human analysts to perform monthl
 - Identifying anomalies and suspicious patterns (e.g., fraud)
 - Writing executive reports for stakeholders
 
-This process consumes several analyst-days per month and is error-prone and non-scalable. The goal of this project is to build an autonomous multi-agent pipeline that replaces this manual workflow end-to-end.
+This process consumes several analyst-days per month and is error-prone and non-scalable. The goal of this project is to build an autonomous multi-agent pipeline — powered by a Large Language Model — that replaces this manual workflow end-to-end and is capable of analysing **any CSV dataset** given an explicit analysis goal.
 
 ---
 
@@ -23,11 +23,13 @@ This process consumes several analyst-days per month and is error-prone and non-
 
 | # | Objective |
 |---|-----------|
-| O-1 | Automatically ingest and validate a financial transaction CSV file |
-| O-2 | Perform a full Exploratory Data Analysis (EDA) to surface key patterns |
-| O-3 | Detect anomalies and suspicious transactions (fraud signals) |
-| O-4 | Generate a structured executive report in Markdown format |
-| O-5 | Run the full pipeline with minimal human intervention |
+| O-1 | Automatically ingest and validate any financial transaction CSV file |
+| O-2 | Use an LLM to semantically understand the dataset schema in the context of a user-defined goal |
+| O-3 | Prescribe and execute appropriate analyses based on the LLM's understanding |
+| O-4 | Detect anomalies and suspicious transactions (fraud signals) using statistical methods |
+| O-5 | Generate a complete, LLM-authored executive report in Markdown |
+| O-6 | Run the full pipeline with a single command and minimal human intervention |
+| O-7 | Operate gracefully without an LLM API key (pandas-only fallback) |
 
 ---
 
@@ -38,10 +40,13 @@ This process consumes several analyst-days per month and is error-prone and non-
 | Property | Value |
 |---|---|
 | File | `./dataset/creditcard.csv` |
-| Origin | European cardholders — September 2013 (Kaggle public dataset) |
-| Total Transactions | ~284,807 rows |
-| Fraud Cases | ~492 (approx 0.172% of total — highly imbalanced) |
-| Duration covered | 2 days |
+| Origin | European cardholders — September 2013 |
+| Download | [Kaggle — Credit Card Fraud Detection](https://www.kaggle.com/datasets/mlg-ulb/creditcardfraud) |
+| Total Transactions | ~284,807 rows (283,726 after deduplication) |
+| Fraud Cases | 473 (0.167% — highly imbalanced) |
+| Duration covered | ~48 hours |
+
+> ⚠️ The dataset is **not committed** to the repository (143MB > GitHub 100MB limit). Download and place at `dataset/creditcard.csv`.
 
 ### 3.2 Schema
 
@@ -54,148 +59,184 @@ This process consumes several analyst-days per month and is error-prone and non-
 
 ### 3.3 Known Data Quality Issues
 
-- **Highly imbalanced classes**: fraud is only 0.172% of data. Standard accuracy is a misleading metric — use **AUPRC** (Area Under Precision-Recall Curve).
-- **No missing values** expected in the original dataset, but the pipeline must still validate and handle them defensively.
-- **No categorical or temporal string columns** — all fields are numerical.
+- **Highly imbalanced classes**: fraud is only 0.167% of data. Standard accuracy is a misleading metric — use **AUPRC** (Area Under Precision-Recall Curve).
+- **1,081 duplicate rows** present in the raw dataset — removed by Agent 1.
+- No missing values expected in the original dataset, but the pipeline validates defensively.
 - `Time` is relative (seconds from first record), not an absolute timestamp.
 
 ---
 
 ## 4. Required Architecture
 
-The system is a **composed multi-agent pipeline** implemented in Python. Each agent has a single, well-defined responsibility. Agents communicate by passing structured data artifacts (e.g., DataFrames, dictionaries, Markdown strings) through a sequential data flow.
+The system is a **sequential LLM-driven multi-agent pipeline** implemented in Python. Each agent has a single responsibility. Agents communicate through typed Python dataclasses. The pipeline accepts an analysis goal that drives all LLM reasoning.
 
 ```
- [CSV File]
-     |
-     v
-+--------------+
-|  Agent 1     |  Ingestion & Validation
-|  Ingestion   |---> Cleaned DataFrame + Summary Stats
-+--------------+
-     |
-     v
-+--------------+
-|  Agent 2     |  Exploratory Data Analysis
-|  EDA         |---> Analysis Results Dict (distributions, trends, anomalies)
-+--------------+
-     |
-     v
-+--------------+
-|  Agent 3     |  Report Generation
-|  Report      |---> executive_report.md
-|  Writer      |
-+--------------+
+[creditcard.csv]  +  [--goal "detect fraudulent transactions"]
+        │
+        ▼
+┌───────────────────────────────────────────┐
+│  Agent 1 — DataProfilerAgent  (LLM)       │
+│  Input:  csv_path + goal                  │
+│  Output: DataProfile JSON                 │
+└───────────────────────────────────────────┘
+        │
+        ▼  DataFrame + DataProfile
+┌───────────────────────────────────────────┐
+│  Agent 2 — AnalysisAgent  (pandas + LLM)  │
+│  Input:  DataFrame + DataProfile          │
+│  Output: AnalysisResult JSON              │
+└───────────────────────────────────────────┘
+        │
+        ▼  DataProfile + AnalysisResult
+┌───────────────────────────────────────────┐
+│  Agent 3 — ReportWriterAgent  (LLM)       │
+│  Input:  DataProfile + AnalysisResult     │
+│  Output: executive_report.md              │
+└───────────────────────────────────────────┘
 ```
 
 ---
 
 ## 5. Agent Specifications
 
-### 5.1 Agent 1 — Ingestion & Validation
+### 5.1 Agent 1 — `DataProfilerAgent`
 
-**Trigger:** Receives the path to `creditcard.csv`.
+**File:** `agents/data_profiler_agent.py`
+
+**Trigger:** Receives `csv_path: str` and `goal: str`.
 
 **Responsibilities:**
 
 | Task | Detail |
 |------|--------|
-| Schema validation | Assert expected columns are present (`Time`, `V1`–`V28`, `Amount`, `Class`) |
-| Row integrity check | Detect duplicate rows; log and drop them |
-| Null / missing values | Count nulls per column; apply appropriate imputation strategy (e.g., median fill for numeric) or drop if threshold exceeded |
-| Data type coercion | Ensure `Class` is `int`, `Amount` and `Time` are `float64` |
-| Basic summary | Compute and return a `DataSummary` struct |
+| Load CSV | Read with `pd.read_csv`; detect and remove duplicate rows |
+| Null validation | Count nulls per column; raise `DataQualityError` if any column exceeds 20% nulls |
+| Data cleaning | Impute numeric nulls with column median; coerce types |
+| Schema metadata | Compute: shape, dtypes, null counts, sample rows, `describe()` stats |
+| LLM schema analysis | Send schema + goal to Gemini: *"What does each field represent? Which are relevant to the goal? What analyses should be run?"* |
+| Output | Return `(DataFrame, DataProfile)` |
 
-**Output — `DataSummary`:**
+**`DataProfile` output contract:**
 
-```python
+```json
 {
-  "shape": (rows, cols),
-  "dtypes": { col: dtype, ... },
-  "missing_values": { col: count, ... },
-  "duplicates_removed": int,
-  "date_range": {         # derived from Time column
-    "min_time_sec": float,
-    "max_time_sec": float,
-    "span_hours": float
-  },
-  "class_distribution": { 0: int, 1: int },
-  "amount_stats": { "min": float, "max": float, "mean": float, "std": float }
+  "dataset_name": "creditcard.csv",
+  "analysis_goal": "detect fraudulent transactions",
+  "shape": { "rows": 283726, "columns": 31 },
+  "fields": [
+    {
+      "name": "Class",
+      "dtype": "int64",
+      "null_count": 0,
+      "description": "Fraud label — 1 = fraud, 0 = legitimate",
+      "role": "target",
+      "relevant_to_goal": true,
+      "relevance_reason": "This IS the fraud indicator — primary target variable"
+    }
+  ],
+  "target_field": "Class",
+  "domain": "Credit card fraud detection",
+  "fraud_signal_fields": ["V14", "V12", "V10", "V17", "V11"],
+  "prescribed_analyses": [
+    {
+      "name": "class_imbalance",
+      "description": "Count and percentage of each target class",
+      "goal_link": "Establishes baseline fraud prevalence"
+    }
+  ],
+  "llm_summary": "This dataset contains anonymised credit-card transactions..."
 }
 ```
 
 **Failure conditions:**
-- Missing required columns → raise `SchemaValidationError`
+- File not found → raise `FileNotFoundError`
 - More than 20% nulls in any column → raise `DataQualityError`
+
+**Fallback:** If `GEMINI_API_KEY` is absent, returns a basic structural profile without LLM field descriptions or prescribed analyses.
 
 ---
 
-### 5.2 Agent 2 — Exploratory Data Analysis (EDA)
+### 5.2 Agent 2 — `AnalysisAgent`
 
-**Trigger:** Receives the cleaned DataFrame + `DataSummary` from Agent 1.
+**File:** `agents/analysis_agent.py`
+
+**Trigger:** Receives `DataFrame` + `DataProfile` from Agent 1.
 
 **Responsibilities:**
 
 | Task | Detail |
 |------|--------|
-| Class distribution | Count and percentage of fraud vs. legitimate transactions |
-| Amount distribution | Histogram buckets, mean/median/std, percentile breakdown (P25, P75, P95, P99) |
-| Temporal trends | Convert `Time` (seconds) into hourly and weekly bins; compute transaction volume and fraud rate per bin |
-| Top active customers | Since there is no explicit customer ID, proxy by grouping similar `Amount` + `V` feature clusters; report top-N transaction groups by volume |
-| Fraud detection signals | Flag transactions where `Class == 1`; compute average `Amount` for fraud vs. legitimate; identify time windows with elevated fraud rates |
-| Statistical anomalies | Apply IQR-based outlier detection on `Amount`; flag values beyond `Q3 + 3xIQR` |
-| Correlation snapshot | Compute correlation of each `V1`–`V28` feature with `Class` to surface most discriminant features |
+| Read prescribed analyses | Use `DataProfile.prescribed_analyses` to determine what to compute |
+| Class distribution | Count and percentage of each target class value |
+| Amount statistics | Mean, std, P25/P50/P75/P95/P99 percentiles |
+| Outlier detection | IQR method: flag `Amount > Q3 + 3×IQR` (threshold: €293.24) |
+| Temporal analysis | Bin `Time` column into 1-hour windows; compute fraud rate per window |
+| Feature correlation | Pearson correlation of all numeric features with target column |
+| Fraud comparison | Mean `Amount` for fraud vs. legitimate transactions |
+| LLM interpretation | Send all computed stats + `DataProfile` to Gemini for contextual narrative, anomaly description, and 3 actionable insights |
 
-**Output — `EDAResults`:**
+**`AnalysisResult` output contract:**
 
-```python
+```json
 {
-  "class_distribution": { "count": {...}, "pct": {...} },
-  "amount_stats": { "mean": float, "std": float, "percentiles": {...} },
-  "amount_outliers": [ { "index": int, "amount": float }, ... ],
-  "hourly_trend": [ { "hour_bin": int, "tx_count": int, "fraud_count": int }, ... ],
-  "fraud_amount_comparison": { "fraud_mean": float, "legit_mean": float },
-  "top_fraud_time_windows": [ { "hour_bin": int, "fraud_rate": float }, ... ],
-  "top_correlated_features": [ { "feature": str, "correlation": float }, ... ]
+  "class_distribution": { "0": 283253, "1": 473 },
+  "fraud_rate_pct": 0.1667,
+  "amount_mean": 88.47,
+  "outlier_threshold": 293.24,
+  "outliers": [{ "index": 2, "amount": 378.66, "is_fraud": false }],
+  "top_risk_windows": [{ "hour_bin": 26, "fraud_count": 27, "fraud_rate_pct": 1.556 }],
+  "feature_signals": [{ "feature": "V17", "correlation": -0.3135, "interpretation": "..." }],
+  "llm_interpretation": "...",
+  "llm_anomaly_narrative": "...",
+  "llm_key_findings": ["...", "..."],
+  "llm_actionable_insights": [
+    { "title": "...", "finding": "...", "recommended_action": "..." }
+  ],
+  "generated_by": "llm"
 }
 ```
 
+**Fallback:** If LLM is unavailable, returns all computed pandas stats with empty LLM narrative fields.
+
 ---
 
-### 5.3 Agent 3 — Report Writer
+### 5.3 Agent 3 — `ReportWriterAgent`
 
-**Trigger:** Receives `DataSummary` + `EDAResults` from Agents 1 and 2.
+**File:** `agents/report_writer_agent.py`
+
+**Trigger:** Receives `DataProfile` + `AnalysisResult` from Agents 1 and 2.
 
 **Responsibilities:**
 
 | Task | Detail |
 |------|--------|
-| Executive summary | 1–2 paragraph overview of dataset size, time span, fraud prevalence |
-| Analysis section | Structured breakdown of EDA findings (volume, amounts, temporal patterns) |
-| Anomalies table | Markdown table listing the top-N outlier/fraud transactions |
-| Actionable insights | Exactly 3 insights, each with: title, finding, and recommended action |
-| Report footer | Metadata: pipeline run date, data file used, agent versions |
+| Build context prompt | Combine DataProfile, AnalysisResult stats and LLM narratives into a rich prompt |
+| LLM report authoring | Call Gemini with full context; ask it to write the complete executive report in Markdown |
+| Fallback rendering | If LLM unavailable, render report from structured data using markdown template helpers |
+| Write output | Save to `./output/executive_report.md` with metadata footer |
 
-**Output:** `executive_report.md` written to `./output/` directory.
-
-**Report structure:**
+**Report structure (LLM-authored):**
 
 ```markdown
-# Executive Report — Financial Transaction Analysis
+# Executive Report — [LLM-generated title based on goal]
 ## 1. Executive Summary
 ## 2. Dataset Overview
 ## 3. Transaction Analysis
-### 3.1 Volume & Distribution
-### 3.2 Temporal Trends
-### 3.3 Fraud Signals
-## 4. Anomalies Table
+   ### 3.1 Amount Distribution
+   ### 3.2 Temporal Trends
+   ### 3.3 Fraud Signals
+## 4. Anomalies Detected
+   ### 4.1 High-Value Outlier Transactions
+   ### 4.2 Highest-Risk Time Windows
 ## 5. Actionable Insights
-### Insight 1: ...
-### Insight 2: ...
-### Insight 3: ...
-## 6. Methodology Notes
+   ### Insight 1: [LLM-generated title]
+   ### Insight 2: ...
+   ### Insight 3: ...
+## 6. Methodology
 ---
 _Report generated by Brazilian Fintech Agents pipeline_
+_Goal: detect fraudulent transactions_
+_Report source: llm | fallback_
 ```
 
 ---
@@ -205,56 +246,63 @@ _Report generated by Brazilian Fintech Agents pipeline_
 | Requirement | Specification |
 |-------------|---------------|
 | Language | Python 3.10+ |
-| Paradigm | Sequential data-flow (no event loops or async queues required) |
-| Agent orchestration | Each agent is a Python class or module with a `.run()` method; the orchestrator calls them in order |
-| Core Dependencies | `pandas`, `numpy`, `scipy` (stats), optionally `scikit-learn` (IQR / PCA helpers) |
-| No LLM required | The report is generated programmatically — no API keys or external AI services |
-| Secrets policy | No API keys, credentials, or personal data committed to the repository |
+| Paradigm | Sequential data-flow (no event loops or async queues) |
+| Agent orchestration | Each agent is a Python class with a `.run()` method; orchestrator calls them in order |
+| LLM Provider | Google Gemini (`gemini-3.6-flash`) via `google-genai` SDK |
+| Core Dependencies | `pandas`, `numpy`, `scipy`, `google-genai`, `python-dotenv` |
+| API Key | Read from `GEMINI_API_KEY` environment variable or `.env` file — never hardcoded |
+| Secrets policy | No API keys, credentials, or PII committed to the repository |
 | Output | `executive_report.md` written to `./output/` directory |
+| CLI | `python main.py --input <csv> --output <dir> --goal "<goal>"` |
+| Fallback | If API key missing, pipeline completes in pandas-only mode |
 
 ---
 
 ## 7. Deliverables
 
-| # | Deliverable | Description |
-|---|-------------|-------------|
-| D-1 | **Source Code** | Public GitHub repository. Must include `README.md` with run instructions |
-| D-2 | **Architecture Diagram** | Visual diagram of the agent flow (e.g., PNG or embedded Mermaid in README) |
-| D-3 | **Technical Report** (1–2 pages) | Architecture decisions + justification for anomaly detection strategy |
-| D-4 | **`executive_report.md`** | The actual output produced by the pipeline on the provided dataset |
+| # | Deliverable | Status | Location |
+|---|-------------|--------|----------|
+| D-1 | **Source Code** — public GitHub repo with README | ✅ Complete | Repository root |
+| D-2 | **Architecture Diagram** — visual agent flow | ✅ Complete | `design/architecture_diagram.png` |
+| D-3 | **Technical Report** (1–2 pages) — architecture decisions + anomaly strategy | ✅ Complete | `technical_report.md` / `technical_report_pt_br.md` |
+| D-4 | **`executive_report.md`** — pipeline output on provided dataset | ✅ Complete | `output/executive_report.md` |
 
 ---
 
 ## 8. Acceptance Criteria
 
-| ID | Criterion |
-|----|-----------|
-| AC-1 | Agent 1 validates schema and raises a descriptive error for bad input |
-| AC-2 | Agent 1 handles null values without crashing |
-| AC-3 | Agent 2 computes all required EDA metrics without manual intervention |
-| AC-4 | Agent 3 produces a valid, readable Markdown report |
-| AC-5 | The report includes **exactly 3** actionable insights |
-| AC-6 | The pipeline runs end-to-end with a single command (e.g., `python main.py`) |
-| AC-7 | No secrets, keys, or PII are present in the repository |
-| AC-8 | The output report accurately reflects the dataset statistics |
+| ID | Criterion | Status |
+|----|-----------|--------|
+| AC-1 | Agent 1 validates CSV structure and raises descriptive errors for bad input | ✅ |
+| AC-2 | Agent 1 handles null values without crashing | ✅ |
+| AC-3 | Agent 1 uses LLM to identify field roles and prescribe analyses for the goal | ✅ |
+| AC-4 | Agent 2 executes the analyses prescribed by Agent 1 | ✅ |
+| AC-5 | Agent 2 produces LLM-interpreted narrative of statistical findings | ✅ |
+| AC-6 | Agent 3 produces a valid, complete LLM-authored Markdown report | ✅ |
+| AC-7 | The report includes **exactly 3** data-backed actionable insights | ✅ |
+| AC-8 | The pipeline runs end-to-end with a single command (`python main.py`) | ✅ |
+| AC-9 | The pipeline completes gracefully without a Gemini API key (fallback mode) | ✅ |
+| AC-10 | No secrets, keys, or PII are present in the repository | ✅ |
+| AC-11 | The pipeline is dataset-agnostic — works on any CSV with a `--goal` argument | ✅ |
 
 ---
 
 ## 9. Out of Scope
 
 - Real-time transaction monitoring (batch-only)
-- Integration with external data sources or APIs
+- Integration with external data sources beyond the input CSV
 - Machine learning model training or deployment
 - User interface (CLI only)
 - Automated scheduling / cron orchestration
 
 ---
 
-## 10. Open Questions
+## 10. Resolved Questions (v1 → v2)
 
-| # | Question | Owner |
-|---|----------|-------|
-| Q-1 | Should the pipeline output intermediate artifacts (e.g., cleaned CSV, EDA JSON)? | Team |
-| Q-2 | Is a customer segment proxy acceptable given no explicit customer ID in the dataset? | Team |
-| Q-3 | Should the anomaly table include ALL flagged rows or just the top-N? If top-N, what N? | Team |
-| Q-4 | Is a single `main.py` entry point sufficient, or is a CLI with arguments (e.g., `--input`, `--output`) preferred? | Team |
+| # | Question | Resolution |
+|---|----------|-----------|
+| Q-1 | Should the pipeline output intermediate artifacts? | No — single `executive_report.md` output only |
+| Q-2 | Customer segment proxy acceptable? | Out of scope — no customer ID available |
+| Q-3 | Anomaly table: all rows or top-N? | Top 20 outliers by IQR method |
+| Q-4 | Single `main.py` or CLI with arguments? | CLI with `--input`, `--output`, `--goal` |
+| Q-5 | Should LLM be used? | Yes — Gemini powers all 3 agents with graceful fallback |
