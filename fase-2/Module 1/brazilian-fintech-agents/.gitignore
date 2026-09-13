@@ -1,7 +1,9 @@
 # output directory — generated reports (not committed)
 output/
 
-# Python
+# Dataset — too large for GitHub (143MB), download from Kaggle
+dataset/creditcard.csv
+
 __pycache__/
 *.py[cod]
 *.egg-info/

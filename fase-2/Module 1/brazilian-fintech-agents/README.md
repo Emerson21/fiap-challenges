@@ -72,7 +72,17 @@ The report will be written to `./output/executive_report.md`.
 
 ## Dataset
 
-The pipeline expects `./dataset/creditcard.csv` — a credit-card fraud detection dataset with the following schema:
+> ⚠️ **The dataset is NOT included in this repository** (143MB — exceeds GitHub's 100MB limit).  
+> Download it from Kaggle before running the pipeline:
+>
+> 📥 **[Credit Card Fraud Detection — Kaggle](https://www.kaggle.com/datasets/mlg-ulb/creditcardfraud)**
+>
+> After downloading, place the file at:
+> ```
+> dataset/creditcard.csv
+> ```
+
+The pipeline expects `./dataset/creditcard.csv` with the following schema:
 
 | Column | Description |
 |--------|-------------|
