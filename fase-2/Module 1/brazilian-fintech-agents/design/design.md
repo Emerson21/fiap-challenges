@@ -7,7 +7,10 @@
 
 ---
 
+![Brazilian Fintech Agents — Architecture Diagram](./architecture_diagram.png)
+
 ## 1. High-Level Architecture
+
 
 The system is a **sequential data-flow pipeline** composed of three autonomous agents and one orchestrator. Each agent encapsulates its logic in a single class exposing a `.run()` method. Agents do not communicate directly — they receive inputs and return outputs through the orchestrator.
 
